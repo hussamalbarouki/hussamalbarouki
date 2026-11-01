@@ -1,0 +1,10 @@
+{
+  "name": "binance-triangle-lab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only Binance Spot triangular arbitrage verifier for a 50 USDT budget",
+  "type": "commonjs",
+  "scripts": { "start": "node src/server.js", "test": "node --test" },
+  "engines": { "node": ">=22" },
+  "dependencies": { "ws": "8.18.3" }
+}

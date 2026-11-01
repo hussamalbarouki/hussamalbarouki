@@ -1,0 +1,14 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { floorStep,simulate,graphCycles,topBooks } = require('../src/math');
+const s = (symbol,base,quote,min='5') => ({symbol,baseAsset:base,quoteAsset:quote,filters:[{filterType:'LOT_SIZE',minQty:'0.0001',maxQty:'100000',stepSize:'0.0001'},{filterType:'MIN_NOTIONAL',minNotional:min,applyToMarket:true}]});
+const symbols=new Map([s('BTCUSDT','BTC','USDT'),s('BTCETH','BTC','ETH'),s('ETHUSDT','ETH','USDT')].map(x=>[x.symbol,x]));
+const cycle = graphCycles([...symbols.values()],new Set(['USDT','BTC','ETH'])).find(x=>x.label==='USDT → BTC → ETH → USDT');
+const books=new Map([['BTCUSDT',{asks:[[10,100]],bids:[[9.9,100]]}],['BTCETH',{bids:[[2,100]],asks:[[2.1,100]]}],['ETHUSDT',{bids:[[6,100]],asks:[[6.1,100]]}]]);
+test('constructs correct market-side routes',()=>{assert.ok(cycle);assert.deepEqual(cycle.edges.map(x=>x.side),['BUY','SELL','SELL']);});
+test('fee charged on each received asset and positive case',()=>{const x=simulate(cycle,books,symbols,50,0.001);assert.equal(x.ok,true);assert.ok(x.netUsd>9 && x.netUsd<10);});
+test('fails with insufficient depth',()=>{const b=new Map(books);b.set('BTCUSDT',{asks:[[10,1]],bids:[[9.9,1]]});assert.equal(simulate(cycle,b,symbols,50,0.001).reason,'insufficient_ask_depth');});
+test('fails on 50 USDT when min notional is too large',()=>{const m=new Map(symbols);m.set('BTCUSDT',s('BTCUSDT','BTC','USDT','100'));assert.equal(simulate(cycle,books,m,50,0.001).reason,'notional_rejected');});
+test('discards tiny dust conservatively',()=>{assert.equal(floorStep(1.23459,'0.001'),1.234);});
+test('rejects stale top book',()=>{const t=new Map([['BTCUSDT',{bid:10,ask:10.1,bidQty:9,askQty:9,at:1}]]);assert.equal(topBooks(cycle,t,100,1000),null);});
