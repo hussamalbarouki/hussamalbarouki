@@ -19,6 +19,16 @@ test('first run, 2FA, session, protected settings and persistent events API', {t
   assert.equal((await req('/api/settings','GET',undefined,true)).body.values.capital,75);
   assert.equal((await req('/api/settings','POST',{capital:-100},true)).status,400);
   assert.equal((await req('/api/events','GET',undefined,true)).status,200);
+  assert.equal((await req('/api/shadow/status')).status,401);
+  assert.equal((await req('/api/shadow/events')).status,401);
+  assert.equal((await req('/api/shadow/equity')).status,401);
+  assert.equal((await req('/api/shadow/export')).status,401);
+  assert.equal((await req('/api/shadow/status','GET',undefined,true)).status,200);
+  assert.equal((await req('/api/shadow/events','GET',undefined,true)).status,200);
+  assert.equal((await req('/api/shadow/equity','GET',undefined,true)).status,200);
+  assert.equal((await req('/api/settings','POST',{shadowSymbol:'BTCUSDT',shadowMakerFee:0.001},true)).status,200);
+  assert.equal((await req('/api/settings','POST',{shadowSymbol:'malformed'},true)).status,400);
+  assert.equal((await req('/api/shadow/reset','POST',{confirm:'RESET SHADOW',password:'bad',code:'000000'},true)).status,401);
   assert.equal((await req('/api/auth/logout','POST',{},true)).status,200);
   assert.equal((await req('/api/status','GET',undefined,true)).status,401);
   assert.equal((await req('/api/setup/prepare','POST',{setupCode:code})).status,401);

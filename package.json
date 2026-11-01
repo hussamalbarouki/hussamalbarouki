@@ -1,9 +1,9 @@
 {
   "name": "hussam-monitor",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "commonjs",
-  "description": "مراقبة حسام | Binance Spot triangular arbitrage research, read-only",
+  "description": "مراقبة حسام | Binance Spot Triangular Arbitrage + Shadow Maker research, read-only",
   "engines": {"node": ">=22"},
   "scripts": {"start": "node src/server.js", "test": "node --test"}
 }

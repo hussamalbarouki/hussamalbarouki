@@ -3,6 +3,7 @@ const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
 const crypto=require('node:crypto');
 const {Store}=require('./store'),{FIELDS,defaults,validate}=require('./settings');
 const {graphCycles,preview,simulate}=require('./math');
+const {ShadowEngine}=require('./shadow');
 const auth=require('./auth');
 const started=Date.now(),port=Number(process.env.PORT)||3000,dir=process.env.DATA_DIR||path.join(__dirname,'..','data');
 const store=new Store(dir);
@@ -13,10 +14,11 @@ let setupSecret=null;
 if(setupCode)console.log('\n=== مراقبة حسام | FIRST RUN SETUP CODE ===\n'+setupCode+'\nUse only on your HTTPS website, do not share it.\n=======================================\n');
 let state={phase:'starting',connected:false,lastError:'',lastMessageAt:0,blockedUntil:0,universeAt:0,wsReconnects:0,
  symbols:0,routes:0,observed:0,scans:0,previews:0,validations:0,qualified:0,near:null,best:store.bestQualified(),requests:0};
-let meta=new Map(),cycles=[],ticks=new Map(),socket=null,retryTimer=null,buildGeneration=0;
+let meta=new Map(),allSpotMeta=new Map(),cycles=[],ticks=new Map(),socket=null,retryTimer=null,buildGeneration=0;
 let inValidation=false,lastScan=0,verificationTimes=[],routeCooldown=new Map(),bootstrapRunning=false;
 const requestAttempts=new Map();
 const listen=new Set();
+const shadow=new ShadowEngine({store,rest:(url,timeout)=>rest(url,timeout),log:console.log,onEvent:ev=>broadcast('shadow-event',ev)});
 const stamp=()=>new Date().toISOString();
 const log=(...v)=>console.log(stamp(),...v);
 function rateLimit(key,max=7,windowMs=15*60*1000){const now=Date.now(),v=(requestAttempts.get(key)||[]).filter(t=>t>now-windowMs);v.push(now);requestAttempts.set(key,v);return v.length<=max;}
@@ -42,6 +44,7 @@ function connect(symbolNames,generation){if(generation!==buildGeneration)return;
 async function bootstrap(){if(bootstrapRunning)return;bootstrapRunning=true;const generation=++buildGeneration;try{
  state.phase='loading Binance markets';const [exchange,volumes]=await Promise.all([rest('/api/v3/exchangeInfo',14000),rest('/api/v3/ticker/24hr',14000)]);
  const rows=exchange.symbols.filter(tradeable),volume=new Map(volumes.map(x=>[x.symbol,Number(x.quoteVolume)||0]));
+ allSpotMeta=new Map(rows.map(x=>[x.symbol,x]));shadow.configure(settings,allSpotMeta.get(settings.shadowSymbol));
  const base=rows.filter(x=>x.quoteAsset==='USDT'&&!/(UP|DOWN|BULL|BEAR)$/.test(x.baseAsset)).filter(x=>(volume.get(x.symbol)||0)>=settings.minVolume).sort((a,b)=>(volume.get(b.symbol)||0)-(volume.get(a.symbol)||0)).slice(0,settings.maxAssets).map(x=>x.baseAsset);
  const assets=new Set(['USDT','BTC','ETH','BNB',...base]),included=rows.filter(x=>assets.has(x.baseAsset)&&assets.has(x.quoteAsset)),newCycles=graphCycles(included,assets),symbols=new Set(newCycles.flatMap(c=>c.edges.map(e=>e.symbol)));
  if(!newCycles.length)throw Error('No available USDT triangular paths');meta=new Map(included.filter(s=>symbols.has(s.symbol)).map(s=>[s.symbol,s]));cycles=newCycles;ticks.clear();routeCooldown.clear();state.routes=cycles.length;state.symbols=symbols.size;state.observed=0;state.universeAt=Date.now();state.phase='connecting';
@@ -63,7 +66,7 @@ async function verify(c){const when=Date.now(),set={...settings},metadata=new Ma
  broadcast('event',{id:event.id,outcome:event.outcome,route:event.route,secondUsd:event.secondUsd,at:event.at});
 }
 async function scanning(){if(settings.paused||inValidation||!state.connected||!cycles.length||Date.now()<state.blockedUntil||Date.now()-lastScan<settings.scanIntervalMs)return;lastScan=Date.now();if(!state.lastMessageAt||Date.now()-state.lastMessageAt>20000)return;const c=candidate();if(!c)return;state.previews++;verificationTimes=verificationTimes.filter(t=>t>Date.now()-60000);if(verificationTimes.length>=settings.maxVerifyPerMinute)return;inValidation=true;verificationTimes.push(Date.now());try{await verify(c);}finally{inValidation=false;}}
-function dashboard(){const d=store.summary();return {...state,uptimeSeconds:Math.floor((Date.now()-started)/1000),lastMessageAgeMs:state.lastMessageAt?Date.now()-state.lastMessageAt:null,cooldownMs:Math.max(0,state.blockedUntil-Date.now()),settings:{capital:settings.capital,fee:settings.fee,bufferBps:settings.bufferBps,liquiditySharePct:settings.liquiditySharePct,paused:settings.paused},summary:d,warning:'Read-only research signals; zero executed orders or realized profits.'};}
+function dashboard(){const d=store.summary();return {...state,uptimeSeconds:Math.floor((Date.now()-started)/1000),lastMessageAgeMs:state.lastMessageAt?Date.now()-state.lastMessageAt:null,cooldownMs:Math.max(0,state.blockedUntil-Date.now()),settings:{capital:settings.capital,fee:settings.fee,bufferBps:settings.bufferBps,liquiditySharePct:settings.liquiditySharePct,paused:settings.paused},summary:d,shadow:shadow.status(),warning:'Read-only research signals; zero executed orders or realized profits.'};}
 function broadcast(type,data){for(const client of listen)try{client.write('event: '+type+'\ndata: '+JSON.stringify(data)+'\n\n');}catch{listen.delete(client);}}
 const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.svg':'image/svg+xml'};
 const publicDir=path.resolve(__dirname,'..','public');
@@ -94,7 +97,29 @@ const server=http.createServer(async(req,res)=>{res.setHeader('X-Frame-Options',
   res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});res.write('retry: 3000\n\n');listen.add(res);const every=setInterval(()=>{if(!store.session(auth.hashToken(session.token))){clearInterval(every);listen.delete(res);res.end();return;}try{res.write('event: status\ndata: '+JSON.stringify(dashboard())+'\n\n');}catch{clearInterval(every);listen.delete(res);}},1500);req.on('close',()=>{clearInterval(every);listen.delete(res);});return;
  }
  if(pathname==='/api/settings'&&req.method==='GET')return respond(res,200,{fields:FIELDS,values:settings});
- if(pathname==='/api/settings'&&req.method==='POST'){try{const next=validate(await body(req));const before=settings;const updated={...settings,...next};store.set('settings',updated);settings=updated;if(before.maxAssets!==updated.maxAssets||before.minVolume!==updated.minVolume){bootstrap().catch(e=>log(e.message));}state.phase=settings.paused?'paused':state.connected?'monitoring':state.phase;return respond(res,200,{ok:true,values:settings});}catch(e){return deny(res,400,e.message);}}
+ if(pathname==='/api/settings'&&req.method==='POST'){try{const next=validate(await body(req));const before=settings;const updated={...settings,...next};store.set('settings',updated);settings=updated;if(before.maxAssets!==updated.maxAssets||before.minVolume!==updated.minVolume){bootstrap().catch(e=>log(e.message));}shadow.configure(settings,allSpotMeta.get(settings.shadowSymbol));state.phase=settings.paused?'paused':state.connected?'monitoring':state.phase;return respond(res,200,{ok:true,values:settings});}catch(e){return deny(res,400,e.message);}}
+ if(pathname==='/api/shadow/status'&&req.method==='GET')return respond(res,200,{...shadow.status(),summary:store.shadowSummary(shadow.ledger?.trial)});
+ if(pathname==='/api/shadow/equity'&&req.method==='GET')return respond(res,200,{points:store.equityHistory(shadow.ledger?.trial)});
+ if(pathname==='/api/shadow/events'&&req.method==='GET'){
+  const url=new URL(req.url,'http://localhost'),limit=Math.max(1,Math.min(200,Number(url.searchParams.get('limit'))||50)),offset=Math.max(0,Math.min(100000,Number(url.searchParams.get('offset'))||0)),trial=url.searchParams.get('trial')||null;
+  if(trial&&!/^[a-f0-9-]{36}$/.test(trial))return deny(res,400,'Bad trial ID');
+  return respond(res,200,{events:store.shadowEvents(limit,offset,trial),limit,offset});
+ }
+ if(pathname==='/api/shadow/reset'&&req.method==='POST'){
+  try{if(!rateLimit('shadowreset:'+req.socket.remoteAddress,6))return deny(res,429,'محاولات كثيرة، حاول لاحقاً');const d=await body(req);if(d.confirm!=='RESET SHADOW')return deny(res,400,'يجب تأكيد بداية تجربة جديدة');
+   if(!auth.passwordMatches(String(d.password||''),account))return deny(res,401,'كلمة المرور غير صحيحة');
+   const step=auth.checkTotp(account.totpSecret,d.code,account.lastTotpStep);
+   if(step<0)return deny(res,401,'رمز المصادقة غير صحيح أو سبق استخدامه');
+   account.lastTotpStep=step;store.set('account',account);shadow.reset();return respond(res,200,{ok:true,shadow:shadow.status()});
+  }catch(e){return deny(res,400,e.message);}
+ }
+ if(pathname==='/api/shadow/export'&&req.method==='GET'){
+  res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="hussam-shadow-history.csv"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
+  res.write('\uFEFFid,utc,trial,symbol,type,details_json\n');let offset=0;
+  const cell=x=>'"'+String(x??'').replace(/"/g,'""').replace(/^[=+@\-\t\r]/,'\u0027$&')+'"';
+  while(offset<100000){const rows=store.shadowEvents(500,offset);for(const e of rows)res.write([e.id,new Date(e.at).toISOString(),e.trial,e.symbol,e.type,JSON.stringify(e.detail)].map(cell).join(',')+'\n');offset+=rows.length;if(rows.length<500)break;}
+  res.end();return;
+ }
  if(pathname==='/api/events'&&req.method==='GET'){const url=new URL(req.url,'http://localhost'),limit=Math.max(1,Math.min(200,Number(url.searchParams.get('limit'))||50)),offset=Math.max(0,Math.min(100000,Number(url.searchParams.get('offset'))||0)),filter=url.searchParams.get('filter')||'all';if(!['all','qualified','rejected'].includes(filter))return deny(res,400,'فلتر غير صحيح');return respond(res,200,{events:store.events(limit,offset,filter),limit,offset,filter});}
  if(pathname==='/api/export'&&req.method==='GET'){const url=new URL(req.url,'http://localhost'),filter=url.searchParams.get('filter')||'all';if(!['all','qualified','rejected'].includes(filter))return deny(res,400,'فلتر غير صحيح');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="hussam-opportunities.csv"','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.write('\uFEFFid,utc,route,status,preview_usdt,first_usdt,second_usdt,net_pct,elapsed_ms,reason\n');let offset=0;const cell=x=>'"'+String(x??'').replace(/"/g,'""').replace(/^[=+@\-\t\r]/,'\u0027$&')+'"';while(true){const rows=store.events(500,offset,filter);for(const e of rows)res.write([e.id,new Date(e.at).toISOString(),e.route,e.outcome,e.previewUsd,e.firstUsd,e.secondUsd,e.netPct,e.elapsedMs,e.reason].map(cell).join(',')+'\n');if(rows.length<500)break;offset+=rows.length;if(offset>=100000)break;}res.end();return;}
  return deny(res,404,'Not found');
@@ -104,5 +129,5 @@ setInterval(()=>{scanning().catch(e=>{state.lastError=e.message;inValidation=fal
 setInterval(()=>{refreshTop().catch(e=>log(e.message));},15000);
 setInterval(()=>{if(!bootstrapRunning&&state.universeAt&&Date.now()-state.universeAt>6*3600000)bootstrap().catch(e=>log(e.message));},60000);
 setInterval(()=>{if(state.connected&&Date.now()-state.lastMessageAt>90000){state.lastError='WebSocket feed stale, reconnecting';try{socket.close();}catch{}}store.purge(settings.retentionDays);},60000);
-process.on('SIGTERM',()=>{clearTimeout(retryTimer);if(socket)socket.close();server.close(()=>{store.close();process.exit(0);});setTimeout(()=>process.exit(0),4000).unref();});
+process.on('SIGTERM',()=>{shadow.stop();clearTimeout(retryTimer);if(socket)socket.close();server.close(()=>{store.close();process.exit(0);});setTimeout(()=>process.exit(0),4000).unref();});
 bootstrap().catch(e=>log(e.message));
